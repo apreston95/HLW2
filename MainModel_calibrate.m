@@ -63,11 +63,10 @@ function calib = MainModel_calibrate(calibSpec)
     if ~isfield(calibSpec,'display'), calibSpec.display = true; end
     if ~isfield(calibSpec,'maxFunEvals'), calibSpec.maxFunEvals = 300; end
     if ~isfield(calibSpec,'maxIters'), calibSpec.maxIters = 200; end
-    if ~isfield(calibSpec,'nStarts'), calibSpec.nStarts = 3; end
-    if ~isfield(calibSpec,'feasibleSearchDraws'), calibSpec.feasibleSearchDraws = 40; end
 
-    % Ensure we start from a point where the model can actually run.
-    xStart = find_feasible_start(x0, lb, ub, paramNames, calibSpec.feasibleSearchDraws, calibSpec.display);
+    z0 = bounded_to_unbounded(x0, lb, ub);
+
+    obj = @(z) objective_from_unbounded(z, paramNames, lb, ub, targets, calibSpec.display);
 
     options = optimset('Display', ternary(calibSpec.display,'iter','off'), ...
                        'MaxFunEvals', calibSpec.maxFunEvals, ...
@@ -75,41 +74,19 @@ function calib = MainModel_calibrate(calibSpec)
                        'TolX', 1e-4, ...
                        'TolFun', 1e-4);
 
-    best = struct('fval', inf, 'z', [], 'x', [], 'exitflag', [], 'output', []);
+    [zStar, fval, exitflag, output] = fminsearch(obj, z0, options);
 
-    for s = 1:calibSpec.nStarts
-        if s == 1
-            xSeed = xStart;
-        else
-            jitter = (ub-lb) .* (0.10 .* (2*rand(1,n)-1));
-            xSeed = min(max(xStart + jitter, lb), ub);
-        end
-
-        z0 = bounded_to_unbounded(xSeed, lb, ub);
-        obj = @(z) objective_from_unbounded(z, paramNames, lb, ub, targets, calibSpec.display);
-        [zStar, fval, exitflag, output] = fminsearch(obj, z0, options);
-
-        if fval < best.fval
-            best.fval = fval;
-            best.z = zStar;
-            best.x = unbounded_to_bounded(zStar, lb, ub);
-            best.exitflag = exitflag;
-            best.output = output;
-        end
-    end
-
-    xStar = best.x;
+    xStar = unbounded_to_bounded(zStar, lb, ub);
     override = build_override(paramNames, xStar);
-    override = apply_dependent_overrides(override);
     bestRun = MainModel_main_mod(override);
 
     calib = struct();
     calib.paramNames = paramNames;
     calib.bestValues = xStar;
     calib.override = override;
-    calib.objective = best.fval;
-    calib.exitflag = best.exitflag;
-    calib.output = best.output;
+    calib.objective = fval;
+    calib.exitflag = exitflag;
+    calib.output = output;
     calib.bestRun = bestRun;
     calib.targets = targets;
 
@@ -118,57 +95,17 @@ function calib = MainModel_calibrate(calibSpec)
         for i = 1:n
             fprintf('  %s = %.8g\n', paramNames{i}, xStar(i));
         end
-        fprintf('  objective = %.8g\n', best.fval);
+        fprintf('  objective = %.8g\n', fval);
     end
-end
-
-function xStart = find_feasible_start(x0, lb, ub, paramNames, nDraws, doDisplay)
-    [isFeasible, ~] = check_feasible(x0, paramNames);
-    if isFeasible
-        xStart = x0;
-        return;
-    end
-
-    if doDisplay
-        fprintf('Initial values are infeasible. Searching for a feasible start...\n');
-    end
-
-    xStart = [];
-    for k = 1:nDraws
-        u = rand(1, numel(x0));
-        cand = lb + (ub-lb).*u;
-        [ok, ~] = check_feasible(cand, paramNames);
-        if ok
-            xStart = cand;
-            break;
-        end
-    end
-
-    if isempty(xStart)
-        error('MainModel_calibrate:noFeasibleStart', ...
-            ['No feasible start found in bounds. ', ...
-             'Model runs are failing for tested points; expand bounds or adjust parameters.']);
-    end
-end
-
-function [ok, run] = check_feasible(x, paramNames)
-    override = build_override(paramNames, x);
-    override = apply_dependent_overrides(override);
-    run = MainModel_main_mod(override);
-    ok = isfield(run,'success') && run.success;
 end
 
 function loss = objective_from_unbounded(z, paramNames, lb, ub, targets, doDisplay)
     x = unbounded_to_bounded(z, lb, ub);
     override = build_override(paramNames, x);
-    override = apply_dependent_overrides(override);
 
     run = MainModel_main_mod(override);
     if ~isfield(run,'success') || ~run.success
-        % Non-constant penalty to help optimizer move off bad regions.
-        mid = 0.5*(lb+ub);
-        scale = max(ub-lb, 1e-6);
-        loss = 1e9 + 1e3*sum(((x-mid)./scale).^2);
+        loss = 1e9;
         return;
     end
 
@@ -189,8 +126,8 @@ function loss = objective_from_unbounded(z, paramNames, lb, ub, targets, doDispl
             continue;
         end
 
-        s = max(abs(targetVal), 1e-6);
-        err = (modelVal - targetVal) / s;
+        scale = max(abs(targetVal), 1e-6);
+        err = (modelVal - targetVal) / scale;
         loss = loss + weight * err^2;
     end
 
