@@ -25,6 +25,8 @@ function calib = MainModel_calibrate(calibSpec)
 %   - display (logical, default=true)
 %   - maxFunEvals (default=300)
 %   - maxIters (default=200)
+%   - nStarts (default=3): number of optimization restarts
+%   - feasibleSearchDraws (default=40): random points used if x0 fails
 %
 % Returns struct calib with best params, objective value, optimizer output,
 % and model results at optimum.
@@ -153,6 +155,16 @@ function override = build_override(paramNames, x)
     override = struct();
     for i = 1:numel(paramNames)
         override.(paramNames{i}) = x(i);
+    end
+end
+
+function override = apply_dependent_overrides(override)
+    % Keep internally linked parameters coherent during optimization.
+    if isfield(override,'theta1') && ~isfield(override,'theta0')
+        override.theta0 = 1 - override.theta1;
+    end
+    if isfield(override,'r') && ~isfield(override,'yH')
+        override.yH = override.r;
     end
 end
 
